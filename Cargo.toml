@@ -6,7 +6,7 @@ members = ["crates/km-proto", "crates/km-core", "crates/km-store-sqlcipher", "cr
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/official-kryo-to/kryoto-messaging"
+repository = "https://github.com/Kryoto-Dev/kryoto-messaging"
 rust-version = "1.85"
 
 [workspace.dependencies]
