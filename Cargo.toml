@@ -10,7 +10,7 @@ repository = "https://github.com/Kryoto-Dev/kryoto-messaging"
 rust-version = "1.85"
 
 [workspace.dependencies]
-km-proto = { path = "crates/km-proto" }
+km-proto = { path = "crates/km-proto", version = "0.1.1" }
 # Olm (1:1 Double Ratchet). Default features pull in libolm compatibility we
 # do not need; precomputed tables are a pure speed-up.
 vodozemac = { version = "0.11", default-features = false, features = ["precomputed-tables"] }
@@ -30,7 +30,7 @@ proptest = "1.11"
 # not depend on whatever libcrypto the user's machine has.
 rusqlite = { version = "0.40", default-features = false }
 hex = "0.4"
-km-core = { path = "crates/km-core" }
+km-core = { path = "crates/km-core", version = "0.1.1" }
 
 [profile.test]
 # Key generation and HPKE are slow unoptimised; property tests run hundreds.

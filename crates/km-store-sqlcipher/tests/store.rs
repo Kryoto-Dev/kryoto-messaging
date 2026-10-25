@@ -89,7 +89,9 @@ fn the_file_is_encrypted_and_the_key_matters() {
     let bytes = std::fs::read(&path).unwrap();
     assert!(!bytes.starts_with(b"SQLite format 3"), "file has a plain SQLite header");
     let hay = String::from_utf8_lossy(&bytes);
-    for needle in ["seal_secret", "sessions", "kv", "master_key"] {
+    // Long enough not to turn up by chance in tens of kilobytes of
+    // ciphertext: a two-letter table name like `kv` does, about every other run.
+    for needle in ["seal_secret", "sessions", "master_key", "CREATE TABLE"] {
         assert!(!hay.contains(needle), "found {needle:?} in the database file");
     }
 
