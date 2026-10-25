@@ -243,6 +243,15 @@ pub enum CallKind {
     Decline = 5,
     /// Already in another call.
     Busy = 6,
+    /// Mid-call, the caller's new offer after the network changed (an ICE
+    /// restart); the payload is its SDP. Clients that predate it drop it.
+    Restart = 7,
+    /// The answer to a `Restart`.
+    Restarted = 8,
+    /// The sender muted their microphone (no payload).
+    Muted = 9,
+    /// The sender unmuted it again.
+    Unmuted = 10,
 }
 
 /// Voice call signalling, end-to-end encrypted like everything else: the
