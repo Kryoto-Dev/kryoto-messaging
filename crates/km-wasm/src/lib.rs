@@ -101,6 +101,8 @@ fn content_to_json(c: &Content) -> Value {
             },
             "payload": k.payload,
         }),
+        Some(Body::CallLog(l)) => json!({ "type": "callLog", "callId": hex::encode(&l.call_id), "answered": l.answered, "seconds": l.seconds }),
+        Some(Body::Active(_)) => json!({ "type": "active" }),
         None => json!({ "type": "none" }),
     };
     json!({ "msgId": hex::encode(&c.msg_id), "conversationId": hex::encode(&c.conversation_id), "sentAt": c.sent_at_ms, "body": body })
@@ -163,6 +165,12 @@ fn content_from_json(v: &Value) -> Result<Content, JsError> {
             } as i32,
             payload: s("payload"),
         }),
+        "callLog" => Body::CallLog(km_proto::CallLog {
+            call_id: unhex(&b["callId"])?,
+            answered: b["answered"].as_bool().unwrap_or(false),
+            seconds: b["seconds"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+        }),
+        "active" => Body::Active(km_proto::Active {}),
         other => return Err(err(format!("unknown body type {other}"))),
     };
     Ok(Content {
@@ -674,6 +682,8 @@ mod tests {
             json!({ "type": "groupMeta", "name": "crew" }),
             json!({ "type": "file", "id": "5", "token": "ab", "key": "00", "sha256": "11", "name": "f", "mime": "m", "size": 9, "width": 0, "height": 0 }),
             json!({ "type": "call", "callId": "00112233445566778899aabbccddeeff", "callKind": "offer", "payload": "sdp" }),
+            json!({ "type": "callLog", "callId": "00112233445566778899aabbccddeeff", "answered": true, "seconds": 185 }),
+            json!({ "type": "active" }),
         ];
         for b in bodies {
             let v = json!({ "msgId": "00112233445566778899aabbccddeeff", "conversationId": "646d3a", "sentAt": 7, "body": b });

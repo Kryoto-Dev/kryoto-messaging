@@ -116,14 +116,13 @@ pub fn validate_outgoing(content: &Content, supporter: bool) -> Result<()> {
             }
         }
         Some(Body::Delete(d)) if d.target.len() != 16 => return Err(CoreError::Malformed),
-        Some(Body::Reaction(r)) => {
-            if r.target.len() != 16 || r.emoji.is_empty() || r.emoji.chars().count() > REACTION_LIMIT {
-                return Err(CoreError::Malformed);
-            }
+        Some(Body::Reaction(r)) if r.target.len() != 16 || r.emoji.is_empty() || r.emoji.chars().count() > REACTION_LIMIT => {
+            return Err(CoreError::Malformed)
         }
         Some(Body::Invite(i)) if !invite_valid(i) => return Err(CoreError::Malformed),
         Some(Body::Attachment(a)) if !attachment_valid(a) => return Err(CoreError::Malformed),
         Some(Body::Call(c)) if !call_valid(c) => return Err(CoreError::Malformed),
+        Some(Body::CallLog(l)) if !call_log_valid(l) => return Err(CoreError::Malformed),
         Some(Body::GroupMeta(g)) if g.name.trim().is_empty() || g.name.chars().count() > GROUP_NAME_LIMIT => {
             return Err(CoreError::Malformed)
         }
@@ -174,6 +173,11 @@ pub fn attachment_valid(a: &km_proto::Attachment) -> bool {
 /// Call signalling within sane bounds (an SDP is a few KB).
 pub fn call_valid(c: &km_proto::Call) -> bool {
     c.call_id.len() == 16 && km_proto::CallKind::try_from(c.kind).is_ok_and(|k| k != km_proto::CallKind::Unspecified) && c.payload.len() <= 16 * 1024
+}
+
+/// A call record: one call, and no call lasts more than a day.
+pub fn call_log_valid(l: &km_proto::CallLog) -> bool {
+    l.call_id.len() == 16 && (l.answered || l.seconds == 0) && l.seconds <= 24 * 3600
 }
 
 /// What a receiver shows for an incoming message.
@@ -247,6 +251,17 @@ mod tests {
             Shown::Truncated(t) => assert_eq!(t.chars().count(), TEXT_LIMIT),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn call_records_are_one_call_within_a_day() {
+        let log = |call_id: Vec<u8>, answered: bool, seconds: u32| content(Body::CallLog(km_proto::CallLog { call_id, answered, seconds }));
+        assert!(validate_outgoing(&log(vec![1; 16], true, 185), false).is_ok());
+        assert!(validate_outgoing(&log(vec![1; 16], false, 0), false).is_ok(), "a missed call");
+        assert!(validate_outgoing(&log(vec![1; 16], false, 30), false).is_err(), "unanswered calls have no length");
+        assert!(validate_outgoing(&log(vec![1; 15], true, 1), false).is_err());
+        assert!(validate_outgoing(&log(vec![1; 16], true, 2 * 24 * 3600), false).is_err());
+        assert!(validate_outgoing(&content(Body::Active(km_proto::Active {})), false).is_ok());
     }
 
     #[test]

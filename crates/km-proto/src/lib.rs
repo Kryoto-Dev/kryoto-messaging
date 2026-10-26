@@ -62,7 +62,7 @@ pub struct Content {
     /// records a send time, so this is the only one there is.
     #[prost(uint64, tag = "3")]
     pub sent_at_ms: u64,
-    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20")]
+    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22")]
     pub body: Option<content::Body>,
 }
 
@@ -91,6 +91,10 @@ pub mod content {
         Attachment(super::Attachment),
         #[prost(message, tag = "20")]
         Call(super::Call),
+        #[prost(message, tag = "21")]
+        CallLog(super::CallLog),
+        #[prost(message, tag = "22")]
+        Active(super::Active),
     }
 }
 
@@ -253,6 +257,27 @@ pub enum CallKind {
     /// The sender unmuted it again.
     Unmuted = 10,
 }
+
+/// A finished call, kept in the conversation so both people can see it was
+/// made: sent by the caller when the call ends, stored like a message, to the
+/// other person and the caller's own devices. Clients that predate it skip it.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CallLog {
+    #[prost(bytes = "vec", tag = "1")]
+    pub call_id: Vec<u8>,
+    /// They picked up. False: missed, declined or cancelled before an answer.
+    #[prost(bool, tag = "2")]
+    pub answered: bool,
+    /// How long it lasted once answered, in seconds.
+    #[prost(uint32, tag = "3")]
+    pub seconds: u32,
+}
+
+/// "I am using Kryoto on this device right now": sent now and then, only to
+/// the sender's own other devices and never stored, so those leave the
+/// notifications to the device in front of the person. No fields.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Active {}
 
 /// Voice call signalling, end-to-end encrypted like everything else: the
 /// WebRTC session description (with its DTLS fingerprint) and ICE candidates.
