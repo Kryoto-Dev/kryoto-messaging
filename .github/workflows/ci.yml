@@ -49,6 +49,10 @@ jobs:
   supply-chain:
     name: Licenses, bans, advisories
     runs-on: ubuntu-latest
+    # audit-check reports through a check run; the org's default token is read-only.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
