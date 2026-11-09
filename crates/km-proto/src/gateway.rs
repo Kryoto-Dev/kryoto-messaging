@@ -27,7 +27,7 @@ pub struct ClientFrame {
     pub request_id: u32,
     #[prost(
         oneof = "client_frame::Kind",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
     )]
     pub kind: Option<client_frame::Kind>,
 }
@@ -81,6 +81,8 @@ pub mod client_frame {
         PushSubscribe(super::PushSubscribe),
         #[prost(message, tag = "32")]
         PushUnsubscribe(super::Empty),
+        #[prost(message, tag = "33")]
+        AttachmentDelete(super::AttachmentDelete),
     }
 }
 
@@ -357,6 +359,10 @@ pub struct Send {
     /// (instead of being friends). 0 for a direct message.
     #[prost(uint64, tag = "4")]
     pub group_id: u64,
+    /// Stored and delivered as usual, but nothing to tell anyone about while
+    /// they are away: receipts, edits, reactions and the like.
+    #[prost(bool, tag = "5")]
+    pub quiet: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -566,6 +572,14 @@ pub struct AttachmentUpload {
     pub expires_at_ms: i64,
 }
 
+/// The file is gone with the message showing it: only the account that
+/// uploaded it may ask. Answered `Ok` whether or not there was anything to take.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttachmentDelete {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+}
+
 // ---- web push --------------------------------------------------------------
 
 /// A browser's Web Push subscription for this device. Answered with `Ok`.
@@ -577,7 +591,8 @@ pub struct AttachmentUpload {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PushSubscribe {
     /// The push service URL from `PushSubscription.endpoint` (https, a known
-    /// push service, at most 1024 bytes).
+    /// push service, at most 1024 bytes), or a phone's
+    /// `kryo-native:<poll key>`.
     #[prost(string, tag = "1")]
     pub endpoint: String,
 }

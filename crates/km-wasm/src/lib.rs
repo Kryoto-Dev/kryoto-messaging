@@ -433,6 +433,7 @@ impl Kryo {
             "groupAdd" => C::GroupAdd(gw::GroupAdd { group_id: num(&a["groupId"])?, user_ids: ids(&a["userIds"])? }),
             "groupRemove" => C::GroupRemove(gw::GroupRemove { group_id: num(&a["groupId"])?, user_id: num(&a["userId"])? }),
             "attachmentTicket" => C::AttachmentTicket(gw::AttachmentTicket { size: num(&a["size"])? }),
+            "attachmentDelete" => C::AttachmentDelete(gw::AttachmentDelete { id: num(&a["id"])? }),
             "pushSubscribe" => C::PushSubscribe(gw::PushSubscribe { endpoint: a["endpoint"].as_str().unwrap_or_default().to_string() }),
             "pushUnsubscribe" => C::PushUnsubscribe(gw::Empty {}),
             other => return Err(err(format!("unknown request {other}"))),
@@ -508,7 +509,7 @@ impl Kryo {
     /// of ids) and return the Send frame. Throws "nothing to send" if no
     /// device could be reached.
     #[wasm_bindgen(js_name = sendFrame)]
-    pub fn send_frame(&mut self, request_id: u32, content: &str, users: &str, ephemeral: bool, group_id: &str) -> Result<Vec<u8>, JsError> {
+    pub fn send_frame(&mut self, request_id: u32, content: &str, users: &str, ephemeral: bool, group_id: &str, quiet: bool) -> Result<Vec<u8>, JsError> {
         let c = content_from_json(&serde_json::from_str(content).map_err(err)?)?;
         let users = ids(&serde_json::from_str(users).map_err(err)?)?;
         let mut items = Vec::new();
@@ -525,7 +526,7 @@ impl Kryo {
             return Err(err("nothing to send"));
         }
         let group_id = group_id.parse().unwrap_or(0);
-        Ok(frame(request_id, C::Send(gw::Send { client_msg_id: c.msg_id.clone(), items, ephemeral, group_id })))
+        Ok(frame(request_id, C::Send(gw::Send { client_msg_id: c.msg_id.clone(), items, ephemeral, group_id, quiet })))
     }
 
     /// Decrypt a delivered envelope. Returns `{"ok": {sender, content}}` or
@@ -723,7 +724,7 @@ mod tests {
         let bundle = gw::KeysBundle { user_id: 2, keys: vec![gw::ClaimedKey { device_id: 22, prekey: Some(u.prekeys[0].clone()) }] };
         alice.add_claims(&server_to_json(&ServerFrame { request_id: 4, kind: Some(S::KeysBundle(bundle)) }).to_string()).unwrap();
         let content = json!({ "msgId": Kryo::new_message_id_js(), "conversationId": "646d3a", "sentAt": 1, "body": { "type": "text", "text": "hello bob", "replyTo": "" } });
-        let send = alice.send_frame(5, &content.to_string(), "[\"2\"]", false, "").unwrap();
+        let send = alice.send_frame(5, &content.to_string(), "[\"2\"]", false, "", false).unwrap();
         let Some(C::Send(s)) = gw::ClientFrame::decode(send.as_slice()).unwrap().kind else { panic!() };
         // Bob decrypts once he knows Alice's device.
         let r: Value = serde_json::from_str(&bob.decrypt(&s.items[0].envelope)).unwrap();
