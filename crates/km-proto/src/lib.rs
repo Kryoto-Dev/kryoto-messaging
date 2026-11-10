@@ -62,7 +62,7 @@ pub struct Content {
     /// records a send time, so this is the only one there is.
     #[prost(uint64, tag = "3")]
     pub sent_at_ms: u64,
-    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22")]
+    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25")]
     pub body: Option<content::Body>,
 }
 
@@ -95,6 +95,12 @@ pub mod content {
         CallLog(super::CallLog),
         #[prost(message, tag = "22")]
         Active(super::Active),
+        #[prost(message, tag = "23")]
+        HistoryRequest(super::HistoryRequest),
+        #[prost(message, tag = "24")]
+        HistoryChunk(super::HistoryChunk),
+        #[prost(message, tag = "25")]
+        HistoryAck(super::HistoryAck),
     }
 }
 
@@ -278,6 +284,119 @@ pub struct CallLog {
 /// notifications to the device in front of the person. No fields.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Active {}
+
+// ---- history from one of your devices to another (KB-0254) --------------------
+//
+// A new device (first set up, or restored with the recovery code) has none of
+// the account's past messages: nothing is kept on the server. It asks the
+// account's other devices with `HistoryRequest`; one whose player says yes
+// sends what it holds as `HistoryChunk`s, encrypted to that one device and
+// delivered live (ephemeral, never stored); the new device answers each with
+// `HistoryAck`. All three only ever travel between devices of one account, in
+// the account's own conversation (`dm_conversation_id(me, me)`). Clients that
+// predate them skip them.
+
+/// "This device wants the account's past messages." Sent stored to all of
+/// the account's other devices once (so one that is offline sees it when it
+/// comes back), and live again each time the new device reconnects while it
+/// is still waiting.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HistoryRequest {
+    /// 16 random bytes naming this request; every chunk and ack carries it.
+    #[prost(bytes = "vec", tag = "1")]
+    pub transfer_id: Vec<u8>,
+    /// What the new device calls itself, for "Send your chat history to ...?"
+    #[prost(string, tag = "2")]
+    pub device_name: String,
+}
+
+/// One message as a device holds it: the stored row, not the original
+/// message (edits, deletes, reactions and receipts already applied).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HistoryItem {
+    #[prost(bytes = "vec", tag = "1")]
+    pub msg_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub conversation_id: Vec<u8>,
+    #[prost(uint64, tag = "3")]
+    pub sender_user: u64,
+    #[prost(uint64, tag = "4")]
+    pub sender_device: u64,
+    #[prost(bool, tag = "5")]
+    pub outgoing: bool,
+    #[prost(uint64, tag = "6")]
+    pub sent_at_ms: u64,
+    #[prost(uint64, tag = "7")]
+    pub received_at_ms: u64,
+    /// "text", "gif", "invite", "file" or "call", as the clients store them.
+    #[prost(string, tag = "8")]
+    pub kind: String,
+    /// The stored body: the text, or the other kinds as their JSON.
+    #[prost(string, tag = "9")]
+    pub body: String,
+    /// msg_id of the message it replies to, or empty.
+    #[prost(bytes = "vec", tag = "10")]
+    pub reply_to: Vec<u8>,
+    /// When it was last edited (ms), or 0.
+    #[prost(uint64, tag = "11")]
+    pub edited_at_ms: u64,
+    #[prost(bool, tag = "12")]
+    pub deleted: bool,
+    /// "sent", "delivered" or "read" for your own; "received" (unread) or
+    /// "read" for theirs. Unsent messages never travel.
+    #[prost(string, tag = "13")]
+    pub status: String,
+    #[prost(message, repeated, tag = "14")]
+    pub reactions: Vec<HistoryReaction>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HistoryReaction {
+    #[prost(string, tag = "1")]
+    pub emoji: String,
+    #[prost(uint64, repeated, tag = "2")]
+    pub user_ids: Vec<u64>,
+}
+
+/// A group's name (only the devices know it; see `GroupMeta`).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HistoryGroup {
+    #[prost(uint64, tag = "1")]
+    pub group_id: u64,
+    #[prost(string, tag = "2")]
+    pub name: String,
+}
+
+/// One part of the history, oldest messages first. Sized so its envelope
+/// fits the gateway's 64 KiB limit (km-core `history`).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HistoryChunk {
+    #[prost(bytes = "vec", tag = "1")]
+    pub transfer_id: Vec<u8>,
+    /// 0-based; `total` chunks in all.
+    #[prost(uint32, tag = "2")]
+    pub index: u32,
+    #[prost(uint32, tag = "3")]
+    pub total: u32,
+    #[prost(message, repeated, tag = "4")]
+    pub items: Vec<HistoryItem>,
+    /// Group names, in the first chunk.
+    #[prost(message, repeated, tag = "5")]
+    pub groups: Vec<HistoryGroup>,
+}
+
+/// The new device's answer: it has every chunk before `next`. With `done`
+/// (sent stored to all of the account's devices) the history is complete and
+/// the other devices stop asking their players.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HistoryAck {
+    #[prost(bytes = "vec", tag = "1")]
+    pub transfer_id: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub next: u32,
+    #[prost(bool, tag = "3")]
+    pub done: bool,
+}
 
 /// Voice call signalling, end-to-end encrypted like everything else: the
 /// WebRTC session description (with its DTLS fingerprint) and ICE candidates.

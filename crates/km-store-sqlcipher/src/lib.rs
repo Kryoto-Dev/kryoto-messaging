@@ -17,7 +17,7 @@ compile_error!("`plain-sqlite-dev` stores chat state unencrypted and must never 
 
 mod messages;
 
-pub use messages::{ConversationRow, MessageRow, NewMessage, ReactionRow, Status};
+pub use messages::{item_of, ConversationRow, MessageRow, NewMessage, ReactionRow, Status};
 
 use std::path::Path;
 

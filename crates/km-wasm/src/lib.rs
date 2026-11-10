@@ -103,6 +103,13 @@ fn content_to_json(c: &Content) -> Value {
         }),
         Some(Body::CallLog(l)) => json!({ "type": "callLog", "callId": hex::encode(&l.call_id), "answered": l.answered, "seconds": l.seconds }),
         Some(Body::Active(_)) => json!({ "type": "active" }),
+        Some(Body::HistoryRequest(r)) => json!({ "type": "historyRequest", "transferId": hex::encode(&r.transfer_id), "deviceName": r.device_name }),
+        Some(Body::HistoryChunk(h)) => json!({
+            "type": "historyChunk", "transferId": hex::encode(&h.transfer_id), "index": h.index, "total": h.total,
+            "items": h.items.iter().map(row_json).collect::<Vec<_>>(),
+            "groups": h.groups.iter().map(|g| json!({ "groupId": g.group_id.to_string(), "name": g.name })).collect::<Vec<_>>(),
+        }),
+        Some(Body::HistoryAck(a)) => json!({ "type": "historyAck", "transferId": hex::encode(&a.transfer_id), "next": a.next, "done": a.done }),
         None => json!({ "type": "none" }),
     };
     json!({ "msgId": hex::encode(&c.msg_id), "conversationId": hex::encode(&c.conversation_id), "sentAt": c.sent_at_ms, "body": body })
@@ -171,6 +178,19 @@ fn content_from_json(v: &Value) -> Result<Content, JsError> {
             seconds: b["seconds"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
         }),
         "active" => Body::Active(km_proto::Active {}),
+        "historyRequest" => Body::HistoryRequest(km_proto::HistoryRequest { transfer_id: unhex(&b["transferId"])?, device_name: s("deviceName") }),
+        "historyChunk" => Body::HistoryChunk(km_proto::HistoryChunk {
+            transfer_id: unhex(&b["transferId"])?,
+            index: b["index"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+            total: b["total"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+            items: rows_from_json(&b["items"]),
+            groups: groups_from_json(&b["groups"]),
+        }),
+        "historyAck" => Body::HistoryAck(km_proto::HistoryAck {
+            transfer_id: unhex(&b["transferId"])?,
+            next: b["next"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+            done: b["done"].as_bool().unwrap_or(false),
+        }),
         other => return Err(err(format!("unknown body type {other}"))),
     };
     Ok(Content {
@@ -179,6 +199,70 @@ fn content_from_json(v: &Value) -> Result<Content, JsError> {
         sent_at_ms: v["sentAt"].as_u64().unwrap_or(0),
         body: Some(body),
     })
+}
+
+// ---- history rows <-> JSON (the web store's MessageRow) ---------------------------
+
+fn row_json(i: &km_proto::HistoryItem) -> Value {
+    json!({
+        "msgId": hex::encode(&i.msg_id),
+        "conversationId": hex::encode(&i.conversation_id),
+        "senderUser": i.sender_user.to_string(),
+        "senderDevice": i.sender_device.to_string(),
+        "outgoing": i.outgoing,
+        "sentAt": i.sent_at_ms,
+        "receivedAt": i.received_at_ms,
+        "kind": i.kind,
+        "body": i.body,
+        "replyTo": if i.reply_to.is_empty() { Value::Null } else { json!(hex::encode(&i.reply_to)) },
+        "editedAt": if i.edited_at_ms == 0 { Value::Null } else { json!(i.edited_at_ms) },
+        "deleted": i.deleted,
+        "status": i.status,
+        "reactions": i.reactions.iter().map(|r| json!({ "emoji": r.emoji, "userIds": r.user_ids.iter().map(u64::to_string).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+    })
+}
+
+/// Rows as the web store holds them. Rows that do not parse are left out
+/// (km-core decides what else may travel or be stored).
+fn rows_from_json(v: &Value) -> Vec<km_proto::HistoryItem> {
+    let one = |r: &Value| -> Option<km_proto::HistoryItem> {
+        let at = |k: &str| r[k].as_u64().or_else(|| r[k].as_f64().map(|f| f as u64)).unwrap_or(0);
+        Some(km_proto::HistoryItem {
+            msg_id: hex::decode(r["msgId"].as_str()?).ok()?,
+            conversation_id: hex::decode(r["conversationId"].as_str()?).ok()?,
+            sender_user: num(&r["senderUser"]).ok()?,
+            sender_device: num(&r["senderDevice"]).unwrap_or(0),
+            outgoing: r["outgoing"].as_bool()?,
+            sent_at_ms: at("sentAt"),
+            received_at_ms: at("receivedAt"),
+            kind: r["kind"].as_str()?.to_string(),
+            body: r["body"].as_str().unwrap_or_default().to_string(),
+            reply_to: r["replyTo"].as_str().and_then(|x| hex::decode(x).ok()).unwrap_or_default(),
+            edited_at_ms: at("editedAt"),
+            deleted: r["deleted"].as_bool().unwrap_or(false),
+            status: r["status"].as_str()?.to_string(),
+            reactions: r["reactions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| {
+                    Some(km_proto::HistoryReaction {
+                        emoji: x["emoji"].as_str()?.to_string(),
+                        user_ids: x["userIds"].as_array()?.iter().filter_map(|u| num(u).ok()).collect(),
+                    })
+                })
+                .collect(),
+        })
+    };
+    v.as_array().into_iter().flatten().filter_map(one).collect()
+}
+
+fn groups_from_json(v: &Value) -> Vec<km_proto::HistoryGroup> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|g| Some(km_proto::HistoryGroup { group_id: num(&g["groupId"]).ok()?, name: g["name"].as_str()?.to_string() }))
+        .collect()
 }
 
 // ---- server frames -> JSON ----------------------------------------------------
@@ -529,6 +613,69 @@ impl Kryo {
         Ok(frame(request_id, C::Send(gw::Send { client_msg_id: c.msg_id.clone(), items, ephemeral, group_id, quiet })))
     }
 
+    /// Like `sendFrame`, but to one device of one user only (history goes to
+    /// the one device that asked for it). Throws "nothing to send" if that
+    /// device is not known or cannot be reached.
+    #[wasm_bindgen(js_name = sendFrameTo)]
+    pub fn send_frame_to(&mut self, request_id: u32, content: &str, user_id: &str, device_id: &str, ephemeral: bool) -> Result<Vec<u8>, JsError> {
+        let c = content_from_json(&serde_json::from_str(content).map_err(err)?)?;
+        let u: u64 = user_id.parse().map_err(|_| err("bad user id"))?;
+        let d: u64 = device_id.parse().map_err(|_| err("bad device id"))?;
+        let target = self
+            .devices
+            .get(&u)
+            .and_then(|l| l.iter().find(|t| t.keys().device_id == d).cloned())
+            .ok_or_else(|| err("nothing to send"))?;
+        let pk = self.claims.get(&d).cloned();
+        let envelope = self.device.encrypt(&target, pk.as_ref(), &c).map_err(|_| err("nothing to send"))?;
+        self.claims.remove(&d);
+        let items = vec![gw::SendItem { recipient_device_id: d, envelope }];
+        Ok(frame(request_id, C::Send(gw::Send { client_msg_id: c.msg_id.clone(), items, ephemeral, group_id: 0, quiet: true })))
+    }
+
+    /// Whether one of this account's own devices is known (checked) here.
+    #[wasm_bindgen(js_name = knowsOwnDevice)]
+    pub fn knows_own_device(&self, device_id: &str) -> bool {
+        let Ok(d) = device_id.parse::<u64>() else { return false };
+        self.devices.get(&self.device.user_id()).is_some_and(|l| l.iter().any(|t| t.keys().device_id == d))
+    }
+
+    /// This device's history (stored rows, JSON) cut into the bodies of the
+    /// chunks that carry it to another device: `[{type:"historyChunk",...}]`.
+    #[wasm_bindgen(js_name = historyChunks)]
+    pub fn history_chunks(&self, transfer_id: &str, rows: &str, groups: &str) -> Result<String, JsError> {
+        let tid = hex::decode(transfer_id).map_err(|_| err("bad transfer id"))?;
+        let items = rows_from_json(&serde_json::from_str(rows).map_err(err)?);
+        let groups = groups_from_json(&serde_json::from_str(groups).map_err(err)?);
+        let out: Vec<Value> = km_core::history::chunks(self.device.user_id(), &tid, items, groups)
+            .into_iter()
+            .map(|c| {
+                let wrapped = Content { msg_id: vec![], conversation_id: vec![], sent_at_ms: 0, body: Some(Body::HistoryChunk(c)) };
+                content_to_json(&wrapped)["body"].clone()
+            })
+            .collect();
+        Ok(Value::Array(out).to_string())
+    }
+
+    /// Received history rows against the stored ones with the same ids:
+    /// the rows to write (new or completed), each once, oldest first.
+    #[wasm_bindgen(js_name = historyMerge)]
+    pub fn history_merge(&self, incoming: &str, stored: &str) -> Result<String, JsError> {
+        let me = self.device.user_id();
+        let incoming = rows_from_json(&serde_json::from_str(incoming).map_err(err)?);
+        let stored: HashMap<Vec<u8>, km_proto::HistoryItem> =
+            rows_from_json(&serde_json::from_str(stored).map_err(err)?).into_iter().map(|r| (r.msg_id.clone(), r)).collect();
+        let out: Vec<Value> = km_core::history::merge_rows(me, incoming, |id| stored.get(id).cloned())
+            .iter()
+            .map(|r| {
+                let mut v = row_json(r);
+                v["peerUserId"] = km_core::chat::dm_peer(&r.conversation_id, me).map(|p| json!(p.to_string())).unwrap_or(Value::Null);
+                v
+            })
+            .collect();
+        Ok(Value::Array(out).to_string())
+    }
+
     /// Decrypt a delivered envelope. Returns `{"ok": {sender, content}}` or
     /// `{"error": "unknownSender", "userId"}` (look their devices up, try
     /// again) / `"duplicate"` / `"undecryptable"`.
@@ -685,6 +832,17 @@ mod tests {
             json!({ "type": "call", "callId": "00112233445566778899aabbccddeeff", "callKind": "offer", "payload": "sdp" }),
             json!({ "type": "callLog", "callId": "00112233445566778899aabbccddeeff", "answered": true, "seconds": 185 }),
             json!({ "type": "active" }),
+            json!({ "type": "historyRequest", "transferId": "00112233445566778899aabbccddeeff", "deviceName": "Chrome on Windows" }),
+            json!({ "type": "historyAck", "transferId": "00112233445566778899aabbccddeeff", "next": 3, "done": true }),
+            json!({
+                "type": "historyChunk", "transferId": "00112233445566778899aabbccddeeff", "index": 0, "total": 1,
+                "items": [{
+                    "msgId": "00112233445566778899aabbccddeeff", "conversationId": "646d3a", "senderUser": "1", "senderDevice": "2",
+                    "outgoing": true, "sentAt": 5, "receivedAt": 6, "kind": "text", "body": "hi", "replyTo": null, "editedAt": 7,
+                    "deleted": false, "status": "read", "reactions": [{ "emoji": "\u{1F525}", "userIds": ["9"] }],
+                }],
+                "groups": [{ "groupId": "3", "name": "crew" }],
+            }),
         ];
         for b in bodies {
             let v = json!({ "msgId": "00112233445566778899aabbccddeeff", "conversationId": "646d3a", "sentAt": 7, "body": b });
@@ -756,6 +914,36 @@ mod tests {
         let a: Value = serde_json::from_str(&alice.verify_info("2").unwrap()).unwrap();
         let b: Value = serde_json::from_str(&bob.verify_info("1").unwrap()).unwrap();
         assert_eq!(a["safetyNumber"], b["safetyNumber"]);
+    }
+
+    #[test]
+    fn history_goes_through_json_both_ways() {
+        let k = Kryo::create("1").unwrap();
+        let conv = hex::encode(km_core::chat::dm_conversation_id(1, 2));
+        let row = |id: &str, at: u64, status: &str| {
+            json!({
+                "msgId": id, "conversationId": conv, "peerUserId": "2", "senderUser": "2", "senderDevice": "7", "outgoing": false,
+                "sentAt": at, "receivedAt": at, "kind": "text", "body": "hey", "replyTo": null, "editedAt": null, "deleted": false,
+                "status": status, "reactions": [],
+            })
+        };
+        let rows = json!([row(&"bb".repeat(16), 20, "read"), row(&"aa".repeat(16), 10, "received")]).to_string();
+        let chunks: Value = serde_json::from_str(&k.history_chunks(&"11".repeat(16), &rows, r#"[{"groupId":"4","name":"crew"}]"#).unwrap()).unwrap();
+        assert_eq!(chunks.as_array().unwrap().len(), 1);
+        let c = &chunks[0];
+        assert_eq!((c["type"].as_str(), c["index"].as_u64(), c["total"].as_u64()), (Some("historyChunk"), Some(0), Some(1)));
+        assert_eq!(c["items"][0]["msgId"], "aa".repeat(16), "oldest first");
+        assert_eq!(c["groups"][0]["name"], "crew");
+        // The receiver: one row already here and unread, the other new.
+        let stored = json!([row(&"aa".repeat(16), 10, "received")]).to_string();
+        let mut incoming = c["items"].clone();
+        incoming[0]["status"] = json!("read");
+        let out: Value = serde_json::from_str(&k.history_merge(&incoming.to_string(), &stored).unwrap()).unwrap();
+        let out = out.as_array().unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["status"], "read", "read on the other device");
+        assert_eq!(out[1]["peerUserId"], "2");
+        assert_eq!(out[1]["editedAt"], Value::Null);
     }
 
     #[test]

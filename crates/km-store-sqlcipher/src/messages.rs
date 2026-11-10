@@ -3,6 +3,9 @@
 //! Plaintext lives here and nowhere else: this file is the only place a
 //! message is ever written down, and the whole database is SQLCipher.
 
+use km_core::chat::dm_peer;
+use km_core::history;
+use km_core::proto::{HistoryItem, HistoryReaction};
 use rusqlite::{params, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -122,6 +125,30 @@ fn message_from(r: &Row<'_>) -> rusqlite::Result<MessageRow> {
         status: Status::parse(&status),
         reactions: Vec::new(),
     })
+}
+
+/// A stored row as it travels (km-core `history`).
+pub fn item_of(m: &MessageRow) -> HistoryItem {
+    HistoryItem {
+        msg_id: hex::decode(&m.msg_id).unwrap_or_default(),
+        conversation_id: hex::decode(&m.conversation_id).unwrap_or_default(),
+        sender_user: m.sender_user.parse().unwrap_or(0),
+        sender_device: m.sender_device,
+        outgoing: m.outgoing,
+        sent_at_ms: m.sent_at,
+        received_at_ms: m.received_at,
+        kind: m.kind.clone(),
+        body: m.body.clone(),
+        reply_to: m.reply_to.as_deref().and_then(|r| hex::decode(r).ok()).unwrap_or_default(),
+        edited_at_ms: m.edited_at.unwrap_or(0),
+        deleted: m.deleted,
+        status: m.status.as_str().into(),
+        reactions: m
+            .reactions
+            .iter()
+            .map(|r| HistoryReaction { emoji: r.emoji.clone(), user_ids: r.user_ids.iter().filter_map(|u| u.parse().ok()).collect() })
+            .collect(),
+    }
 }
 
 /// A new message to store.
@@ -337,6 +364,82 @@ impl Store {
         ))?;
         let rows = stmt.query_map([], message_from)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Every stored message as it travels to another of the account's
+    /// devices (km-core `history`), oldest first. Which of them may travel is
+    /// km-core's call.
+    pub fn history_items(&self) -> Result<Vec<HistoryItem>> {
+        let mut stmt = self.conn().prepare(&format!("SELECT {MSG_COLS} FROM messages ORDER BY sent_at, msg_id"))?;
+        let rows = stmt.query_map([], message_from)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        rows.into_iter()
+            .map(|mut m| {
+                m.reactions = self.reactions_for(&hex::decode(&m.msg_id).unwrap_or_default())?;
+                Ok(item_of(&m))
+            })
+            .collect()
+    }
+
+    /// Take in history from another of the account's devices: new rows are
+    /// stored, known ones completed (km-core `history::merge`), each once.
+    /// Unread counts follow the rows. Returns how many rows were written.
+    pub fn merge_history(&self, me: u64, items: Vec<HistoryItem>) -> Result<usize> {
+        let rows = history::merge_rows(me, items, |id| self.message(id).ok().flatten().map(|m| item_of(&m)));
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn().unchecked_transaction()?;
+        let mut touched = std::collections::BTreeSet::new();
+        for r in &rows {
+            tx.execute(
+                "INSERT INTO conversations (id, peer_user_id, last_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (id) DO UPDATE SET last_at = max(last_at, excluded.last_at)",
+                params![r.conversation_id, dm_peer(&r.conversation_id, me).map(|v| v as i64), r.sent_at_ms as i64],
+            )?;
+            tx.execute(
+                "INSERT INTO messages (msg_id, conversation_id, sender_user, sender_device, outgoing, sent_at,
+                                       received_at, kind, body, reply_to, edited_at, deleted, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT (msg_id) DO UPDATE SET body = excluded.body, edited_at = excluded.edited_at,
+                                                    deleted = excluded.deleted, status = excluded.status",
+                params![
+                    r.msg_id,
+                    r.conversation_id,
+                    r.sender_user as i64,
+                    r.sender_device as i64,
+                    i64::from(r.outgoing),
+                    r.sent_at_ms as i64,
+                    r.received_at_ms as i64,
+                    r.kind,
+                    r.body,
+                    (!r.reply_to.is_empty()).then_some(&r.reply_to),
+                    (r.edited_at_ms != 0).then_some(r.edited_at_ms as i64),
+                    i64::from(r.deleted),
+                    r.status,
+                ],
+            )?;
+            tx.execute("DELETE FROM reactions WHERE msg_id = ?1", params![r.msg_id])?;
+            for re in &r.reactions {
+                for u in &re.user_ids {
+                    tx.execute(
+                        "INSERT INTO reactions (msg_id, user_id, emoji) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+                        params![r.msg_id, *u as i64, re.emoji],
+                    )?;
+                }
+            }
+            touched.insert(r.conversation_id.clone());
+        }
+        for conv in touched {
+            tx.execute(
+                "UPDATE conversations SET unread = (SELECT count(*) FROM messages
+                   WHERE conversation_id = ?1 AND outgoing = 0 AND status = 'received' AND deleted = 0)
+                 WHERE id = ?1",
+                params![conv],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rows.len())
     }
 
     /// Messages containing `query` (case-insensitive), newest first. Local

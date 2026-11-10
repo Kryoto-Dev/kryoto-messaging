@@ -123,6 +123,9 @@ pub fn validate_outgoing(content: &Content, supporter: bool) -> Result<()> {
         Some(Body::Attachment(a)) if !attachment_valid(a) => return Err(CoreError::Malformed),
         Some(Body::Call(c)) if !call_valid(c) => return Err(CoreError::Malformed),
         Some(Body::CallLog(l)) if !call_log_valid(l) => return Err(CoreError::Malformed),
+        Some(Body::HistoryRequest(r)) if !crate::history::request_valid(r) => return Err(CoreError::Malformed),
+        Some(Body::HistoryChunk(c)) if !crate::history::chunk_valid(c) => return Err(CoreError::Malformed),
+        Some(Body::HistoryAck(a)) if !crate::history::ack_valid(a) => return Err(CoreError::Malformed),
         Some(Body::GroupMeta(g)) if g.name.trim().is_empty() || g.name.chars().count() > GROUP_NAME_LIMIT => {
             return Err(CoreError::Malformed)
         }

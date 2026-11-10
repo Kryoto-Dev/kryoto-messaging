@@ -224,4 +224,41 @@ mod messages {
         assert_eq!(s.messages(b"c", None, 10).unwrap()[0].body, "kept");
         assert_eq!(s.setting("read_receipts").unwrap().as_deref(), Some("off"));
     }
+
+    /// KB-0254: one device's history into another's store, twice over.
+    #[test]
+    fn history_moves_between_two_stores_once_and_completes_rows() {
+        use km_core::chat::dm_conversation_id;
+        use km_core::history;
+        const ME: u64 = 1;
+        const PEER: u64 = 2;
+        let conv = dm_conversation_id(ME, PEER);
+        let old = Store::open_in_memory(&KEY).unwrap();
+        let new = Store::open_in_memory(&KEY).unwrap();
+        // The old device: three messages, one of them unsent, one unread and reacted to.
+        old.insert_message(&msg(&[1; 16], &conv, ME, true, 10, "hi")).unwrap();
+        old.advance_status(&[1; 16], Status::Read).unwrap();
+        old.insert_message(&msg(&[2; 16], &conv, PEER, false, 20, "hello back")).unwrap();
+        old.apply_reaction(&[2; 16], ME, "🔥", false).unwrap();
+        old.insert_message(&msg(&[3; 16], &conv, ME, true, 30, "not sent yet")).unwrap();
+        // The new device already got the newest message live, unread.
+        new.insert_message(&msg(&[4; 16], &conv, PEER, false, 40, "live")).unwrap();
+        old.insert_message(&msg(&[4; 16], &conv, PEER, false, 40, "live")).unwrap();
+        old.mark_read(&conv, 40).unwrap();
+
+        let chunks = history::chunks(ME, &[7; 16], old.history_items().unwrap(), vec![]);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].items.len(), 3, "the unsent one stays behind");
+        assert_eq!(new.merge_history(ME, chunks[0].items.clone()).unwrap(), 3);
+        assert_eq!(new.merge_history(ME, chunks[0].items.clone()).unwrap(), 0, "a repeated chunk changes nothing");
+
+        let rows = new.messages(&conv, None, 50).unwrap();
+        assert_eq!(rows.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["hi", "hello back", "live"], "in order, once each");
+        assert_eq!(rows[0].status, Status::Read);
+        assert_eq!(rows[1].reactions.len(), 1);
+        let convs = new.conversations().unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].unread, 0, "read on the old device, read here");
+        assert_eq!(convs[0].peer_user_id.as_deref(), Some("2"));
+    }
 }

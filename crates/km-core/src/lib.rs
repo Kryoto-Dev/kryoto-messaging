@@ -21,6 +21,7 @@ pub mod chat;
 mod device;
 mod error;
 mod fingerprint;
+pub mod history;
 mod keys;
 mod trust;
 
